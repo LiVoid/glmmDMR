@@ -123,7 +123,7 @@ DMR calls (TSV + BED)
 BigWig tracks for visualization
 ```
 
-For a detailed tutorial: [tutorial/tutorial_glmmDMR.md](tutorial/tutorial_glmmDMR.md)
+For a detailed tutorial: [tutorial/README.md](tutorial/README.md)
 
 ---
 
