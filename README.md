@@ -377,7 +377,7 @@ For details on benchmarking methodology and comparison with existing DMR detecti
 
 If you use glmmDMR in your research, please cite:
 
-> [Author names] (2025). glmmDMR: a GLMM-based framework for replicate-aware detection of differentially methylated regions. *Genome Biology* (in revision). [DOI upon publication]
+> [Author names] (2025). glmmDMR: a GLMM-based framework for replicate-aware detection of differentially methylated regions. ****. [DOI upon publication]
 
 ---
 
