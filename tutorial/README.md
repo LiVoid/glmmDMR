@@ -75,7 +75,7 @@ bismark \
   -2 clean/sample_R2.trimmed.fq.gz
 
 samtools view -@ 8 -q 42 -b align/sample_R1.trimmed_bismark_bt2_pe.bam | \
-  samtools sort -n -@ 8 -o align/sample.Q42.bam
+samtools sort -n -@ 8 -o align/sample.Q42.bam
 ```
 
 > **Note:** Alignments with mapping quality (MAPQ) below 42 are discarded to reduce multi-mapping artifacts.
