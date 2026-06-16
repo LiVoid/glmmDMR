@@ -148,7 +148,7 @@ python summarize_extractor.py \
 
 **Optional (ONT / modkit pileup BED):**
 
-If your input is ONT methylation calls from modkit `pileup` (BED/BED.GZ), convert it to the same Step-1 output format (`chr, pos, strand, meth, unmeth, context`) before running `BinomTest.py`.
+If your input is ONT methylation calls from [modkit](https://github.com/nanoporetech/modkit) `pileup` (BED/BED.GZ), convert it to the same Step-1 output format (`chr, pos, strand, meth, unmeth, context`) before running `BinomTest.py`.
 
 ```bash
 python scripts/modkit_bed_to_binom_input.py \
