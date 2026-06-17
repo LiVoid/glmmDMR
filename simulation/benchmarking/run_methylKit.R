@@ -30,12 +30,6 @@ filtered.myobj=filterByCoverage(myobjDB,lo.count=5,lo.perc=NULL,
 
 meth=unite(filtered.myobj, destrand=FALSE)
 
-# Differential methylation
-#myDiff=calculateDiffMeth(meth)
-
-#myDiff25p=getMethylDiff(myDiff,difference=25,qvalue=0.01)
-
-
 tiles <- tileMethylCounts(meth, win.size=300, step.size=200)
 tiles_diff <- calculateDiffMeth(tiles,qvalue=0.05)
 

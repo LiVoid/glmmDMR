@@ -62,7 +62,7 @@ if (!require('methylKit', quietly=TRUE)) BiocManager::install('methylKit')
 ### 1. Convert site data to tool-specific inputs
 
 ```bash
-Rscript 03.convert_sites_for_otherSoft.R ../results/site_window_sim/tsv/sites_CG.tsv.gz
+Rscript 03.convert_sites_for_otherSoft.R ../tsv/site_window_sim/tsv/sites_CG.tsv.gz
 ```
 
 This creates:
@@ -87,7 +87,31 @@ methylKit:
 Rscript run_methylKit.R
 ```
 
-Fisher (window input):
+metilene:
+
+```bash
+Rscript run_metilene.R \
+  --metilene-bin /path/to/metilene \
+  --metilene-output-pl /path/to/metilene_output.pl
+```
+
+DMRfinder:
+
+```bash
+Rscript run_dmrfinder.R \
+  --python-bin python \
+  --combine-script /path/to/combine_CpG_sites.py \
+  --finddmrs-script ./findDMRs_fixed.r
+```
+
+MACAU2:
+
+```bash
+Rscript 04.run_MACAU2.R \
+  --macau2-r-dir /path/to/MACAU2/R
+```
+
+Fisher's exact test:
 
 ```bash
 Rscript run_fisher.R \
@@ -102,32 +126,8 @@ Rscript run_fisher.R \
   --threads 36
 ```
 
-metilene:
-
-```bash
-Rscript 04.run_metilene.R \
-  --metilene-bin /path/to/metilene \
-  --metilene-output-pl /path/to/metilene_output.pl
-```
-
-DMRfinder:
-
-```bash
-Rscript 04.run_dmrfinder.R \
-  --python-bin python \
-  --combine-script /path/to/combine_CpG_sites.py \
-  --finddmrs-script ./findDMRs_fixed.r
-```
-
-MACAU2:
-
-```bash
-Rscript 04.run_MACAU2.R \
-  --macau2-r-dir /path/to/MACAU2/R
-```
 
 ## What is additionally processed in wrapper scripts
-
 Compared with direct bash lines, wrappers handle these processing details:
 
 - 04.run_dmrfinder.R
@@ -144,32 +144,3 @@ Compared with direct bash lines, wrappers handle these processing details:
   - Builds count and coverage matrices from per-sample BED files
   - Runs MACAU2 in BMM mode
   - Writes site-level results and merged significant windows
-
-## Quick output check
-
-```bash
-head output_for_DSS/DSS_dmrs.tsv
-head output_for_methylKit/methylKit_diff.tsv
-head output_for_metilene/metilene_out.tsv
-head output_for_DMRfinder/out_findDMRs.txt
-head output_for_fisher/fisher_out.tsv
-head output_for_MACAU/MACAU2_sites.tsv
-```
-
-## Troubleshooting
-
-- Missing output_for_* files
-  - Run 03.convert_sites_for_otherSoft.R first.
-
-- metilene fails
-  - Check metilene path and metilene_output.pl path.
-  - Check that the input matrix has expected sample columns.
-
-- DMRfinder fails
-  - Verify combine_CpG_sites.py path.
-  - Verify findDMRs_fixed.r exists in this directory or pass --finddmrs-script.
-  - Verify Python and Rscript are available.
-
-- MACAU2 fails
-  - Install MACAU2 package or pass --macau2-r-dir.
-  - Check that all windows_CG_forMACAU_*.bed files exist.

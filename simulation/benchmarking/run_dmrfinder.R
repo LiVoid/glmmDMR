@@ -18,11 +18,11 @@ option_list <- list(
               help = "Group 2 label [default %default]"),
   make_option(c("--rep-per-group"), type = "integer", default = 4,
               help = "Replicates per group [default %default]"),
-  make_option(c("--r"), type = "integer", default = 3,
-              help = "combine_CpG_sites.py -r argument [default %default]"),
-  make_option(c("--s"), type = "integer", default = 4,
-              help = "combine_CpG_sites.py -s argument [default %default]"),
-  make_option(c("--merge-dist"), type = "integer", default = 300,
+  make_option(c("--r", "--min-count-per-cpg"), type = "integer", default = 3,
+              help = "Minimum total counts required at one CpG in one sample (combine_CpG_sites.py -r) [default %default]"),
+  make_option(c("--s", "--min-samples-with-count"), type = "integer", default = 4,
+              help = "Minimum number of samples that must satisfy --r at a CpG (combine_CpG_sites.py -s) [default %default]"),
+  make_option(c("--merge-dist"), type = "integer", default = 200,
               help = "combine_CpG_sites.py -d argument [default %default]"),
   make_option(c("--min-cpg"), type = "integer", default = 3,
               help = "findDMRs -c argument [default %default]"),
@@ -32,6 +32,12 @@ option_list <- list(
               help = "Append one dummy row to avoid chr1-only edge case [default %default]")
 )
 opt <- parse_args(OptionParser(option_list = option_list))
+
+cat("DMRfinder combine thresholds:\n")
+cat("  --r (--min-count-per-cpg):", opt$r,
+  "counts required at one CpG in one sample\n")
+cat("  --s (--min-samples-with-count):", opt$s,
+  "samples must satisfy --r at that CpG\n")
 
 if (!dir.exists(opt$`input-dir`)) {
   stop("Input directory not found: ", opt$`input-dir`)
