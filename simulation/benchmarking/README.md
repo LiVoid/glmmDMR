@@ -6,7 +6,6 @@ This README mirrors the practical workflow used in bash_variance.sh and clarifie
 
 ## Files in this directory
 
-- 03.convert_sites_for_otherSoft.R
 - run_DSS.R
 - run_methylKit.R
 - run_fisher.R
@@ -19,7 +18,6 @@ This README mirrors the practical workflow used in bash_variance.sh and clarifie
 ## Important compatibility notes
 
 - Use the file names above exactly. Some older notes refer to 04.run_DSS.R, 04.run_methylKit.R, and 05.evaluate_dmrs.R, but this directory uses run_DSS.R, run_methylKit.R, and evaluate_dmrs.R.
-- 03.convert_sites_for_otherSoft.R requires one input argument: the sites file. If extra positional arguments are provided, they are ignored.
 - MACAU2 is site-level analysis. The script also writes merged significant windows as a convenience output.
 
 ## External tools and scripts required
