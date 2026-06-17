@@ -9,11 +9,10 @@ This README mirrors the practical workflow used in bash_variance.sh and clarifie
 - run_DSS.R
 - run_methylKit.R
 - run_fisher.R
-- 04.run_metilene.R
-- 04.run_dmrfinder.R
-- 04.run_MACAU2.R
+- run_metilene.R
+- run_dmrfinder.R
+- run_MACAU2.R
 - findDMRs_fixed.r
-- evaluate_dmrs.R
 
 ## Important compatibility notes
 
@@ -125,16 +124,6 @@ MACAU2:
 ```bash
 Rscript 04.run_MACAU2.R \
   --macau2-r-dir /path/to/MACAU2/R
-```
-
-### 3. Evaluate glmmDMR outputs
-
-```bash
-Rscript evaluate_dmrs.R \
-  --simes ../glmmDMR_results/dmrs_simes.tsv \
-  --stouffer ../glmmDMR_results/dmrs_stouffer.tsv \
-  --combined ../glmmDMR_results/dmrs_combined.tsv \
-  --out-prefix results/comparison
 ```
 
 ## What is additionally processed in wrapper scripts
