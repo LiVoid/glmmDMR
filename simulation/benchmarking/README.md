@@ -13,6 +13,7 @@ This README mirrors the practical workflow used in bash_variance.sh and clarifie
 - 04.run_metilene.R
 - 04.run_dmrfinder.R
 - 04.run_MACAU2.R
+- findDMRs_fixed.r
 - evaluate_dmrs.R
 
 ## Important compatibility notes
@@ -28,7 +29,6 @@ These are not bundled in this repository:
 - metilene binary
 - metilene_output.pl
 - DMRfinder combine_CpG_sites.py
-- DMRfinder findDMRs_fixed.r
 - MACAU2 package or MACAU2 R source directory
 
 ## R package dependencies
@@ -119,7 +119,7 @@ DMRfinder:
 Rscript 04.run_dmrfinder.R \
   --python-bin python \
   --combine-script /path/to/combine_CpG_sites.py \
-  --finddmrs-script /path/to/findDMRs_fixed.r
+  --finddmrs-script ./findDMRs_fixed.r
 ```
 
 MACAU2:
@@ -179,7 +179,8 @@ head output_for_MACAU/MACAU2_sites.tsv
   - Check that the input matrix has expected sample columns.
 
 - DMRfinder fails
-  - Verify combine_CpG_sites.py and findDMRs_fixed.r paths.
+  - Verify combine_CpG_sites.py path.
+  - Verify findDMRs_fixed.r exists in this directory or pass --finddmrs-script.
   - Verify Python and Rscript are available.
 
 - MACAU2 fails
