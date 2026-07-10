@@ -11,6 +11,7 @@ show_help() {
     echo "                             [--slide 500] \\"
     echo "                             [--output outdir] \\"
     echo "                             [--tmpdir tmpdir] \\"
+    echo "                             [--threads N] \\"
     echo "                             [--help]"
     echo ""
     echo "Options:"
@@ -22,6 +23,7 @@ show_help() {
     echo "  --slide            Sliding window step in bp (default: 500)"
     echo "  --output           Output directory (default: ./matrix_out)"
     echo "  --tmpdir           Temporary directory for intermediate files"
+    echo "  --threads          Threads for parallel decompress/sort/compress (default: 12)"
     echo "  --help             Show this message and exit"
     exit 0
 }
@@ -33,6 +35,7 @@ outdir="./matrix_out"
 tmpdir=""
 group1_label="group1"
 group2_label="group2"
+threads=12
 group1_files=()
 group2_files=()
 
@@ -47,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --slide) slide="$2"; shift 2 ;;
         --output) outdir="$2"; shift 2 ;;
         --tmpdir) tmpdir="$2"; shift 2 ;;
+        --threads) threads="$2"; shift 2 ;;
         --help) show_help ;;
         *) echo "Unknown option $1"; exit 1 ;;
     esac
@@ -109,7 +113,22 @@ fi
 # Check required tools
 command -v bedtools >/dev/null 2>&1 || { echo "Error: bedtools not found"; exit 1; }
 command -v samtools >/dev/null 2>&1 || { echo "Error: samtools not found"; exit 1; }
-command -v zcat >/dev/null 2>&1 || { echo "Error: zcat not found"; exit 1; }
+
+# Prefer pigz for parallel (de)compression; fall back to gzip/zcat if unavailable.
+if command -v unpigz >/dev/null 2>&1; then
+    DECOMP=(unpigz -c)
+elif command -v zcat >/dev/null 2>&1; then
+    DECOMP=(zcat)
+else
+    echo "Error: neither unpigz nor zcat found"; exit 1
+fi
+have_pigz=0
+command -v pigz >/dev/null 2>&1 && have_pigz=1
+
+# Per-context share of threads (the 3 contexts are processed concurrently).
+ctx_threads=$(( threads / 3 )); (( ctx_threads < 1 )) && ctx_threads=1
+sort_buf="2G"
+echo "[INFO] threads=$threads (per-context sort/compress threads=$ctx_threads), decomp='${DECOMP[*]}', pigz=$have_pigz"
 
 # Prepare .fai if needed
 if [[ "$fasta" == *.fai ]]; then
@@ -127,54 +146,85 @@ if [[ ! -s "$window_bed" ]]; then
     exit 1
 fi
 
-# Create BED from each input
-process_group() {
-    label="$1"
-    context="$2"
-    shift 2
-    files=("$@")
-    for f in "${files[@]}"; do
-        base=$(basename "$f" .tsv.gz)
-        sample_id="$base"
-        if [[ -n "$common_pref" ]]; then
-            sample_id="${sample_id#"$common_pref"}"
-        fi
-        if [[ -n "$common_suf" ]]; then
-            sample_id="${sample_id%"$common_suf"}"
-        fi
-        if [[ -z "$sample_id" ]]; then
-            sample_id="$base"
-        fi
-        echo "[INFO] Processing $context for $label: $sample_id"
-        zcat "$f" | awk -v OFS='\t' -v c="$context" -v g="$label" -v s="$sample_id" '
-            NR>1 && $6 == c {
-                cov = $4 + $5;
-                print $1, $2, $2+1, $6, g, s, $3, $4, $5, cov
-            }
-        ' > "$tmpdir/${label}_${base}_${context}_cytosines.bed"
-    done
+# --- Phase 1: one decompress pass per sample, split into per-context BEDs ---
+# Each input file is read exactly once and demultiplexed by context ($6) into
+# the CpG / CHG / CHH BEDs, instead of re-reading the whole file once per
+# context. Samples are independent, so they run in parallel.
+process_sample() {
+    local label="$1" f="$2"
+    local base sample_id
+    base=$(basename "$f" .tsv.gz)
+    sample_id="$base"
+    [[ -n "$common_pref" ]] && sample_id="${sample_id#"$common_pref"}"
+    [[ -n "$common_suf" ]] && sample_id="${sample_id%"$common_suf"}"
+    [[ -z "$sample_id" ]] && sample_id="$base"
+    echo "[INFO] Splitting by context: $label / $sample_id"
+    "${DECOMP[@]}" "$f" | awk -v OFS='\t' -v g="$label" -v s="$sample_id" \
+        -v f_cpg="$tmpdir/${label}_${base}_CpG_cytosines.bed" \
+        -v f_chg="$tmpdir/${label}_${base}_CHG_cytosines.bed" \
+        -v f_chh="$tmpdir/${label}_${base}_CHH_cytosines.bed" '
+        NR > 1 {
+            cov = $4 + $5
+            # pos ($2) is 1-based (Bismark); BED is 0-based half-open -> [pos-1, pos)
+            line = $1 OFS ($2 - 1) OFS $2 OFS $6 OFS g OFS s OFS $3 OFS $4 OFS $5 OFS cov
+            if      ($6 == "CpG") print line > f_cpg
+            else if ($6 == "CHG") print line > f_chg
+            else if ($6 == "CHH") print line > f_chh
+        }
+    '
 }
 
-# Main loop for CpG, CHG, CHH
-for ctx in CpG CHG CHH; do
-    echo "[INFO] Processing context: $ctx"
+sample_entries=()
+for f in "${group1_files[@]}"; do sample_entries+=("$group1_label"$'\t'"$f"); done
+for f in "${group2_files[@]}"; do sample_entries+=("$group2_label"$'\t'"$f"); done
 
-    # process both groups
-    process_group "$group1_label" "$ctx" "${group1_files[@]}"
-    process_group "$group2_label" "$ctx" "${group2_files[@]}"
-
-    mapfile -t all_bed < <(find "$tmpdir" -name "*_${ctx}_cytosines.bed" -print)
-    if [[ ${#all_bed[@]} -eq 0 ]]; then
-        echo "[WARNING] No $ctx cytosine BED files found"
-        continue
-    fi
-
-    cat "${all_bed[@]}" | LC_ALL=C sort -k1,1 -k2,2n | bedtools intersect -a "$window_bed" -b - -wa -wb |
-    awk -v OFS='\t' '{print $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13}' |
-    gzip > "$outdir/${group1_label}_${group2_label}_${ctx}_matrix.tsv.gz"
-
-    # Cleanup per-context temp beds to save space
-    rm -f "${all_bed[@]}"
+echo "[INFO] Phase 1: splitting ${#sample_entries[@]} samples by context (up to $threads in parallel)"
+n_samples=${#sample_entries[@]}
+fail=0
+for (( i = 0; i < n_samples; i += threads )); do
+    pids=()
+    for (( j = i; j < i + threads && j < n_samples; j++ )); do
+        process_sample "${sample_entries[j]%%$'\t'*}" "${sample_entries[j]#*$'\t'}" &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || fail=1; done
 done
+(( fail == 0 )) || { echo "Error: a sample-splitting job failed"; exit 1; }
+
+# --- Phase 2: per-context sort + window intersect (contexts run in parallel) ---
+# The sites are sorted into .fai chromosome order (external merge sort, spills to
+# disk, so memory stays bounded even at ~1e8 rows) so that
+# 'bedtools intersect -sorted -g' streams both inputs (chromsweep) instead of
+# loading -b into an in-memory interval tree. A leading column with each
+# chromosome's fai rank makes the numeric sort reproduce fai order; it is
+# stripped again before intersect.
+process_context_intersect() {
+    local ctx="$1"
+    local -a beds comp
+    mapfile -t beds < <(find "$tmpdir" -maxdepth 1 -name "*_${ctx}_cytosines.bed" -print)
+    if (( ${#beds[@]} == 0 )); then
+        echo "[WARNING] No $ctx cytosine BED files found"
+        return 0
+    fi
+    if (( have_pigz )); then comp=(pigz -p "$ctx_threads"); else comp=(gzip); fi
+    echo "[INFO] Phase 2: $ctx — sorting ${#beds[@]} BEDs (fai order) + window intersect"
+    cat "${beds[@]}" \
+      | awk 'NR==FNR { rank[$1] = FNR; next } { print rank[$1] "\t" $0 }' "$fai" - \
+      | LC_ALL=C sort -k1,1n -k3,3n -S "$sort_buf" --parallel="$ctx_threads" -T "$tmpdir" \
+      | cut -f2- \
+      | bedtools intersect -sorted -g "$fai" -a "$window_bed" -b - -wa -wb \
+      | "${comp[@]}" > "$outdir/${group1_label}_${group2_label}_${ctx}_matrix.tsv.gz"
+    rm -f "${beds[@]}"
+}
+
+echo "[INFO] Phase 2: intersecting 3 contexts in parallel"
+pids=()
+for ctx in CpG CHG CHH; do
+    process_context_intersect "$ctx" &
+    pids+=($!)
+done
+fail=0
+for p in "${pids[@]}"; do wait "$p" || fail=1; done
+(( fail == 0 )) || { echo "Error: a context intersect job failed"; exit 1; }
 
 echo "[DONE] Matrix files written to $outdir"
