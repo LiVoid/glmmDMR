@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import gzip
 import pandas as pd
 import numpy as np
 from scipy.stats import binomtest
@@ -9,16 +8,55 @@ from statsmodels.stats.multitest import multipletests
 import multiprocessing as mp
 from functools import partial
 from tqdm import tqdm
+from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-def binom_test_row(row, null_prob):
-    n_total = row['meth'] + row['unmeth']
-    return binomtest(row['meth'], n=n_total, p=null_prob, alternative='two-sided').pvalue
+# Optional ISA-L acceleration for gzip I/O (SIMD decompress + multithreaded
+# compress). Falls back to stdlib gzip if not installed, so the script stays
+# portable and output is standard gzip either way.
+try:
+    from isal import igzip as _igzip
+    from isal import igzip_threaded as _igzip_threaded
+    _HAVE_ISAL = True
+except ImportError:
+    _HAVE_ISAL = False
 
-def process_chunk(df_chunk, null_prob):
-    df_chunk['pval'] = df_chunk.apply(binom_test_row, axis=1, null_prob=null_prob)
-    return df_chunk
+
+def _open_read(path):
+    """Open a possibly-gzipped input for reading bytes, via ISA-L when available."""
+    path = str(path)
+    if path.endswith(".gz"):
+        if _HAVE_ISAL:
+            return _igzip.open(path, "rb")
+        import gzip
+        return gzip.open(path, "rb")
+    return open(path, "rb")
+
+
+def _write_tsv_gz(df, path, threads, compresslevel=3):
+    """Write a standard-gzip TSV. Uses multithreaded ISA-L compression when
+    available, else pandas' single-threaded gzip. Decompressed content is
+    identical either way (compression level changes only the .gz byte size)."""
+    if _HAVE_ISAL:
+        level = max(0, min(3, compresslevel))  # ISA-L supports levels 0-3 only
+        with _igzip_threaded.open(path, "wt", compresslevel=level,
+                                  threads=max(1, threads), encoding="utf-8",
+                                  newline="") as fh:
+            df.to_csv(fh, sep="\t", index=False, lineterminator="\n")
+    else:
+        df.to_csv(path, sep="\t", index=False, compression="gzip")
+
+
+def binom_pval(kn, null_prob):
+    """Exact two-sided binomial test p-value for one (k, n) pair.
+
+    Identical call as the original per-row version; only the number of calls
+    changes (once per *unique* (meth, coverage) pair instead of per site).
+    """
+    k, n = kn
+    return binomtest(int(k), n=int(n), p=null_prob, alternative='two-sided').pvalue
+
 
 def main():
     parser = argparse.ArgumentParser(description="Binomial test for methylation sites with FDR correction")
@@ -32,23 +70,23 @@ def main():
     args = parser.parse_args()
 
     # Validate input
-    from pathlib import Path
     input_path = Path(args.input)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {args.input}")
-    
+
     # Create output directory if needed
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"Reading input: {args.input}")
-    df = pd.read_csv(args.input, sep='\t', compression='infer', low_memory=False, dtype={'chr': str})
-    
+    with _open_read(args.input) as _in_fh:
+        df = pd.read_csv(_in_fh, sep='\t', compression=None, low_memory=False, dtype={'chr': str})
+
     if df.empty:
         raise ValueError("Input file is empty")
-    
+
     print(f"Loaded {len(df):,} sites")
-    
+
     # Ensure required columns
     if 'start' not in df.columns and 'pos' in df.columns:
         df['start'] = df['pos']
@@ -58,7 +96,7 @@ def main():
     min_cov = max(1, args.min_coverage)  # Ensure at least 1 to avoid division by zero
     df = df[df['coverage'] >= min_cov]
     print(f"After coverage filter (>={min_cov}): {len(df):,} sites")
-    
+
     if df.empty:
         raise ValueError(f"No sites remaining after coverage filter (min={min_cov})")
 
@@ -78,29 +116,46 @@ def main():
     else:
         print(f"Using specified null_prob: {null_prob}")
 
-    # Parallel binomial test
+    # Binomial test.
+    #
+    # The p-value of a two-sided binomial test depends only on (k, n) = (meth,
+    # coverage) for a fixed null_prob, not on the row. Across ~1.2e8 sites there
+    # are only tens of thousands of distinct (k, n) pairs, so we compute the
+    # exact scipy.stats.binomtest once per unique pair and map the result back
+    # to every site. This is bit-for-bit identical to the original per-row
+    # apply(), but calls binomtest 3-4 orders of magnitude fewer times.
     print(f"Running binomial tests (null_prob={null_prob:.4f}, threads={args.threads})...")
-    chunks = np.array_split(df, args.threads)
-    with mp.Pool(args.threads) as pool:
-        results = list(tqdm(pool.imap(partial(process_chunk, null_prob=null_prob), chunks), 
-                           total=len(chunks), desc="Processing chunks"))
+    uniq = df[['meth', 'coverage']].drop_duplicates().reset_index(drop=True)
+    print(f"Unique (k, n) pairs: {len(uniq):,} (vs {len(df):,} sites)")
 
-    df = pd.concat(results, axis=0)
-    
+    pairs = list(zip(uniq['meth'].to_numpy(), uniq['coverage'].to_numpy()))
+    if args.threads > 1 and len(pairs) > 1000:
+        with mp.Pool(args.threads) as pool:
+            pvals = list(tqdm(pool.imap(partial(binom_pval, null_prob=null_prob), pairs, chunksize=256),
+                              total=len(pairs), desc="Binom tests (unique pairs)"))
+    else:
+        pvals = [binom_pval(p, null_prob) for p in tqdm(pairs, desc="Binom tests (unique pairs)")]
+    uniq['pval'] = pvals
+
+    # Map p-values back to all sites (vectorized left join on integer keys,
+    # preserves the row order of the filtered frame).
+    print("Mapping p-values back to all sites...")
+    df = df.merge(uniq, on=['meth', 'coverage'], how='left')
+
     # FDR correction
     print("Applying FDR correction...")
     df['FDR'] = multipletests(df['pval'], method='fdr_bh')[1]
-    
+
     n_sig = (df['FDR'] <= args.fdr_threshold).sum()
     print(f"Significant sites (FDR <= {args.fdr_threshold}): {n_sig:,} / {len(df):,} ({100*n_sig/len(df):.2f}%)")
-    
+
     # Set meth=0 for non-significant sites (Weighted methylation level approach)
     df.loc[df['FDR'] > args.fdr_threshold, 'meth'] = 0
     print(f"Non-significant sites set to meth=0 for Weighted methylation level calculation")
-    
+
     # Output
     df = df[['chr', 'pos', 'strand', 'meth', 'unmeth', 'context']]
-    df.to_csv(args.output, sep='\t', index=False, compression='gzip')
+    _write_tsv_gz(df, args.output, threads=args.threads)
     print(f"\nOutput written to: {args.output}")
 
 if __name__ == "__main__":
