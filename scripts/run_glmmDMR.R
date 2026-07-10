@@ -288,10 +288,6 @@ if (!is.null(opt$prefilter_delta) && is.finite(opt$prefilter_delta) && opt$prefi
 
 
 
-# ---------- build window list ----------
-WIN_KEYS <- unique(DT[, .(chr,start,end)])
-setkey(WIN_KEYS, chr,start,end)
-
 # ---------- per-window preprocessing ----------
 # aggregate mode: sum meth/unmeth/coverage per (window, sample) -> one row per sample
 # site mode: pass site-level rows through unchanged
@@ -326,39 +322,30 @@ plan(multisession, workers = opt$workers)
 options(future.rng.onMisuse = "ignore",
         future.globals.maxSize = opt$max_globals_mb * 1024^2)
 
-nW <- nrow(WIN_KEYS)
+# ---------- build per-window subsets (single pass) ----------
+# Preprocess the whole table once, then split it into per-window chunks. This
+# replaces the previous O(nW x N) per-window logical scan of DT with a single
+# O(N) grouped pass; for aggregate mode the per-sample summation is likewise done
+# once for the whole table instead of repeatedly per window.
+DT <- prep_window(DT, opt$mode)
+SUB_ALL <- split(DT, by = c("chr", "start", "end"), sorted = FALSE)
+rm(DT); invisible(gc(FALSE))
+
+nW <- length(SUB_ALL)
 if (nW == 0L) stop("No windows after filtering.")
 
-# split to batches (contiguous, roughly equal-sized index chunks)
+# split window subsets into batches (roughly equal-sized chunks) to cap how many
+# payloads are in flight to workers at once
 split_ix <- parallel::splitIndices(nW, min(opt$batches, nW))
 
-# 1) process batches sequentially to reduce memory peak
+# process batches sequentially; fit windows within a batch in parallel
 RES_LIST <- vector("list", length(split_ix))
 
 for (bi in seq_along(split_ix)) {
-  idx <- split_ix[[bi]]
-
-  # create per-window subsets in parent to keep worker payloads small
-  SUB_LIST <- lapply(idx, function(i) {
-    key <- WIN_KEYS[i]
-    sub <- DT[chr == key$chr & start == key$start & end == key$end]
-    if (nrow(sub) == 0L) return(NULL)
-    prep_window(sub, opt$mode)
-  })
-
-  # drop empty
-  keep <- vapply(SUB_LIST, function(x) !is.null(x) && nrow(x) > 0L, logical(1))
-  SUB_LIST <- SUB_LIST[keep]
-  if (length(SUB_LIST) == 0L) {
-    RES_LIST[[bi]] <- data.table::data.table()
-    next
-  }
-
-  # 2) run model fits in parallel
+  SUB_LIST <- SUB_ALL[ split_ix[[bi]] ]
   batch_res <- future.apply::future_lapply(
     SUB_LIST, fit_window_safe, future.seed = TRUE
   )
-
   RES_LIST[[bi]] <- data.table::rbindlist(batch_res, use.names = TRUE, fill = TRUE)
 }
 RES <- data.table::rbindlist(RES_LIST, use.names = TRUE, fill = TRUE)
