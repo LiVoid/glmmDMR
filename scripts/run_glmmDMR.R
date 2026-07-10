@@ -79,12 +79,31 @@ build_formulas <- function(family_tag = c("binom","beta"),
   }
 }
 
+# single source of truth for the model label written to every output row
+model_tag <- function(family, mode) {
+  sprintf("ctx: GLMM %s (%s)",
+          ifelse(family == "binom", "binomial", "beta"),
+          mode)
+}
+
+# placeholder row returned when a window fails to fit
+na_row <- function(chr, start, end, family, mode) {
+  data.table(
+    chr = chr, start = start, end = end,
+    model = model_tag(family, mode),
+    p = NA_real_, delta = NA_real_,
+    mean_rate1 = NA_real_, mean_rate2 = NA_real_,
+    aic_diff = NA_real_, bic_diff = NA_real_
+  )
+}
+
 fit_one_window <- function(win_dt, fam=c("binom","beta"), mode=c("aggregate","site"), re=TRUE) {
   fam  <- match.arg(fam)
   mode <- match.arg(mode)
   # win_dt columns: chr, start, end, cytosine_*, group, sample, meth, unmeth, coverage
-  # construct data frame for glmmTMB
-  D <- copy(win_dt)
+  # win_dt is a fresh, single-use subset (and workers get their own copy), so we
+  # can modify it in place without copy()
+  D <- win_dt
   D[, group := factor(group, levels=c(opt$group1, opt$group2))]
 
   pooled_flag <- (mode=="site")
@@ -97,9 +116,10 @@ fit_one_window <- function(win_dt, fam=c("binom","beta"), mode=c("aggregate","si
     fit_alt  <- glmmTMB(formula = fm$alt,  data = D, family = binomial)
     fit_null <- glmmTMB(formula = fm$null, data = D, family = binomial)
   } else if (fam == "beta") {
-    # beta regression on rate
-    if (!"coverage" %in% names(D)) D[, coverage := meth + unmeth]
-    D[, rate := (meth) / (coverage)]
+    # beta regression on rate; use meth/(meth+unmeth) to stay consistent with the
+    # delta / mean_rate reported below (avoids divergence if an input `coverage`
+    # column carries values other than meth+unmeth)
+    D[, rate := meth / (meth + unmeth)]
     D[, resp := pmax(pmin(rate, 0.99), 0.01)]
     fm <- build_formulas("beta", with_re=re, pooled=pooled_flag)
     fit_alt  <- glmmTMB(formula=fm$alt,  family=beta_family(), data=D)
@@ -121,7 +141,7 @@ fit_one_window <- function(win_dt, fam=c("binom","beta"), mode=c("aggregate","si
 #    chr = D$start[1] * 0 + D$chr[1],    # robust pull
     chr = D$chr[1],    # robust pull
     start = D$start[1], end = D$end[1],
-    model = sprintf("ctx: GLMM %s (%s)", ifelse(fam=="binom","binomial","beta"), mode),
+    model = model_tag(fam, mode),
     p = pval, delta = dlt,
     mean_rate1 = mean_rate_by_group(D,opt$group1),
     mean_rate2 = mean_rate_by_group(D,opt$group2),
@@ -272,43 +292,33 @@ if (!is.null(opt$prefilter_delta) && is.finite(opt$prefilter_delta) && opt$prefi
 WIN_KEYS <- unique(DT[, .(chr,start,end)])
 setkey(WIN_KEYS, chr,start,end)
 
-# aggregate-prep: sum per window x sample
-make_aggregate <- function(D) {
-  D[, .(
-    meth = sum(meth, na.rm=TRUE),
-    unmeth = sum(unmeth, na.rm=TRUE),
-    coverage = sum(coverage, na.rm=TRUE),
-    group = unique(group)[1L],
-    sample = unique(sample)[1L]
-  ), by=.(chr,start,end, sample, group)]
-}
-
- 
-# site-prep: pass through
-make_pooled <- function(D) {
-  copy(D)
+# ---------- per-window preprocessing ----------
+# aggregate mode: sum meth/unmeth/coverage per (window, sample) -> one row per sample
+# site mode: pass site-level rows through unchanged
+prep_window <- function(sub, mode = c("aggregate", "site")) {
+  mode <- match.arg(mode)
+  sub[, `:=`(sample = as.character(sample),
+             group  = as.character(group))]
+  if (mode == "aggregate") {
+    sub <- sub[, .(
+      meth     = sum(meth,     na.rm = TRUE),
+      unmeth   = sum(unmeth,   na.rm = TRUE),
+      coverage = sum(coverage, na.rm = TRUE),
+      group    = unique(group)[1L]
+    ), by = .(chr, start, end, sample)]
+  }
+  sub
 }
 
 # ---------- per-window runner ----------
-by_window_worker <- function(win) {
-  wchr <- win$chr; wst <- win$start; wed <- win$end
-  sub <- DT[chr==wchr & start==wst & end==wed]
-  if (nrow(sub) == 0L) return(NULL)
-
-  if (opt$mode == "aggregate") sub2 <- make_aggregate(sub) else sub2 <- make_pooled(sub)
-
-  sub2[, sample := as.factor(sample)]
-  res <- tryCatch(
-    fit_one_window(sub2, fam = opt$family, mode = opt$mode, re = isTRUE(opt$random_effect)),
-    error=function(e) {
-      data.table(chr=wchr, start=wst, end=wed,
-                 model=sprintf("ctx: GLMM %s (%s)", ifelse(opt$family=="binom","binomial","beta"), opt$mode),
-                 p=NA_real_, delta=NA_real_,
-                 mean_rate1=NA_real_, mean_rate2=NA_real_,
-                 aic_diff=NA_real_, bic_diff=NA_real_)
-    }
+# fit one window, returning an NA placeholder row on failure
+fit_window_safe <- function(sub2) {
+  tryCatch(
+    fit_one_window(sub2, fam = opt$family, mode = opt$mode,
+                   re = isTRUE(opt$random_effect)),
+    error = function(e) na_row(sub2$chr[1L], sub2$start[1L], sub2$end[1L],
+                               opt$family, opt$mode)
   )
-  res
 }
 
 # ---------- parallel ----------
@@ -319,8 +329,8 @@ options(future.rng.onMisuse = "ignore",
 nW <- nrow(WIN_KEYS)
 if (nW == 0L) stop("No windows after filtering.")
 
-# split to batches
-split_ix <- split(1:nW, cut(1:nW, breaks = min(opt$batches, nW), labels = FALSE))
+# split to batches (contiguous, roughly equal-sized index chunks)
+split_ix <- parallel::splitIndices(nW, min(opt$batches, nW))
 
 # 1) process batches sequentially to reduce memory peak
 RES_LIST <- vector("list", length(split_ix))
@@ -333,24 +343,7 @@ for (bi in seq_along(split_ix)) {
     key <- WIN_KEYS[i]
     sub <- DT[chr == key$chr & start == key$start & end == key$end]
     if (nrow(sub) == 0L) return(NULL)
-
-    # aggregate / site preprocessing
-    if (opt$mode == "aggregate") {
-      sub[, `:=`(sample = as.character(sample),
-                 group  = as.character(group))]
-      sub <- sub[, .(
-        meth     = sum(meth,     na.rm=TRUE),
-        unmeth   = sum(unmeth,   na.rm=TRUE),
-        coverage = sum(coverage, na.rm=TRUE),
-        sample   = unique(sample)[1L],
-        group    = unique(group)[1L]
-      ), by = .(chr, start, end, sample)]
-    } else {
-      # site: pass through site rows
-      sub[, `:=`(sample = as.character(sample),
-                 group  = as.character(group))]
-    }
-    sub
+    prep_window(sub, opt$mode)
   })
 
   # drop empty
@@ -363,31 +356,7 @@ for (bi in seq_along(split_ix)) {
 
   # 2) run model fits in parallel
   batch_res <- future.apply::future_lapply(
-    SUB_LIST,
-    function(sub2) {
-      # one-window LRT
-      tryCatch(
-        fit_one_window(
-          win_dt = sub2,
-          fam  = opt$family,
-          mode = opt$mode,
-          re   = isTRUE(opt$random_effect)
-        ),
-        error = function(e) {
-          # return NA row on failure
-          data.table::data.table(
-            chr  = sub2$chr[1L], start = sub2$start[1L], end = sub2$end[1L],
-            model= sprintf("GLMM %s (%s)",
-                           ifelse(opt$family=="binom","binomial","beta"),
-                           opt$mode),
-            p=NA_real_, delta=NA_real_,
-            mean_rate1=NA_real_, mean_rate2=NA_real_,
-            aic_diff=NA_real_,  bic_diff=NA_real_
-          )
-        }
-      )
-    },
-    future.seed = TRUE
+    SUB_LIST, fit_window_safe, future.seed = TRUE
   )
 
   RES_LIST[[bi]] <- data.table::rbindlist(batch_res, use.names = TRUE, fill = TRUE)
