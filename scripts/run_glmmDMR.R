@@ -25,7 +25,7 @@ opt_list <- list(
   make_option("--min_cov", type="integer", default=0, help="per-site minimum coverage (meth+unmeth) before window filters [default %default]"),
   make_option("--min_sites_win", type="integer", default=0, help="minimum #sites in a window to keep [default %default]"),
   make_option("--prefilter_delta", type="double", default=0.00, help="Quick screen by |Δ| >= threshold (0 disables) [default: %default]"),
-  make_option("--workers", type="integer", default=4, help="#workers for future [default %default]"),
+  make_option("--workers", type="integer", default=4, help="#workers for future (fork-based multicore on Linux/Mac, multisession fallback elsewhere) [default %default]"),
   make_option("--batches", type="integer", default=50, help="#batches (split windows) [default %default]"),
   make_option("--max_globals_mb", type="integer", default=1000, help="future.globals.maxSize (MiB) [default %default]"),
   make_option("--seed", type="integer", default=1, help="random seed [default %default]")
@@ -318,7 +318,15 @@ fit_window_safe <- function(sub2) {
 }
 
 # ---------- parallel ----------
-plan(multisession, workers = opt$workers)
+# multicore (fork-based) shares memory via copy-on-write and avoids
+# multisession's serialization overhead; only available on Unix and
+# disabled by future inside RStudio, so probe and fall back.
+if (future::supportsMulticore()) {
+  plan(multicore, workers = opt$workers)
+} else {
+  message("multicore unsupported here (Windows or RStudio); falling back to multisession")
+  plan(multisession, workers = opt$workers)
+}
 options(future.rng.onMisuse = "ignore",
         future.globals.maxSize = opt$max_globals_mb * 1024^2)
 
