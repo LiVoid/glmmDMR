@@ -149,8 +149,12 @@ def main():
     n_sig = (df['FDR'] <= args.fdr_threshold).sum()
     print(f"Significant sites (FDR <= {args.fdr_threshold}): {n_sig:,} / {len(df):,} ({100*n_sig/len(df):.2f}%)")
 
-    # Set meth=0 for non-significant sites (Weighted methylation level approach)
-    df.loc[df['FDR'] > args.fdr_threshold, 'meth'] = 0
+    # Set meth=0 for non-significant sites (Weighted methylation level approach).
+    # Reads that no longer contribute methylation signal are counted as unmethylated;
+    # therefore meth + unmeth (coverage) remains unchanged for every site.
+    nonsig = df['FDR'] > args.fdr_threshold
+    df.loc[nonsig, 'unmeth'] = df.loc[nonsig, 'unmeth'] + df.loc[nonsig, 'meth']
+    df.loc[nonsig, 'meth'] = 0
     print(f"Non-significant sites set to meth=0 for Weighted methylation level calculation")
 
     # Output
