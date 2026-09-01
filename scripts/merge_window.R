@@ -103,6 +103,10 @@ p_stouffer <- function(p_values) {
   p_values <- p_values[is.finite(p_values)]
   k <- length(p_values)
   if (k == 0) return(1)
+  # Clip away from 0/1 so qnorm() never returns +-Inf: a p=0 (LRT statistic
+  # underflow) combined with a p=1 (null-effect window) in the same run would
+  # otherwise sum to Inf + (-Inf) = NaN and crash downstream if() checks.
+  p_values <- pmin(pmax(p_values, 1e-15), 1 - 1e-15)
   z_scores <- qnorm(1 - p_values)
   combined_z <- sum(z_scores) / sqrt(k)
   2 * pnorm(-abs(combined_z))
@@ -256,8 +260,7 @@ detect_dmrs_single_seed <- function(win, p_seed, p_extend, max_gap_bp, min_windo
       }
 
       test_idx <- c(run_idx, j)
-      z_scores <- qnorm(1 - win$p[test_idx])
-      stouffer_p <- 2 * pnorm(-abs(sum(z_scores) / sqrt(length(z_scores))))
+      stouffer_p <- p_stouffer(win$p[test_idx])
       if (stouffer_p <= p_extend && stouffer_p <= current_stouffer_p * max_p_degradation) {
         run_idx <- test_idx
         current_stouffer_p <- stouffer_p
@@ -277,8 +280,7 @@ detect_dmrs_single_seed <- function(win, p_seed, p_extend, max_gap_bp, min_windo
       }
 
       test_idx <- c(k, run_idx)
-      z_scores <- qnorm(1 - win$p[test_idx])
-      stouffer_p <- 2 * pnorm(-abs(sum(z_scores) / sqrt(length(z_scores))))
+      stouffer_p <- p_stouffer(win$p[test_idx])
       if (stouffer_p <= p_extend && stouffer_p <= current_stouffer_p * max_p_degradation) {
         run_idx <- test_idx
         current_stouffer_p <- stouffer_p
@@ -288,8 +290,7 @@ detect_dmrs_single_seed <- function(win, p_seed, p_extend, max_gap_bp, min_windo
       }
     }
 
-    z_scores_final <- qnorm(1 - win$p[run_idx])
-    final_stouffer_p <- 2 * pnorm(-abs(sum(z_scores_final) / sqrt(length(z_scores_final))))
+    final_stouffer_p <- p_stouffer(win$p[run_idx])
     strong_windows_frac <- sum(win$p[run_idx] <= p_seed) / length(run_idx)
 
     if (length(run_idx) >= min_windows &&
@@ -332,8 +333,7 @@ detect_dmrs_stouffer_multi_seed <- function(win, p_seed, p_extend, max_gap_bp, m
       j <- j + 1L
 
       if (length(seed_idx) >= seed_min_windows) {
-        z_scores <- qnorm(1 - win$p[seed_idx])
-        stouffer_seed_p <- 2 * pnorm(-abs(sum(z_scores) / sqrt(length(z_scores))))
+        stouffer_seed_p <- p_stouffer(win$p[seed_idx])
         if (stouffer_seed_p <= p_seed) break
       }
     }
@@ -343,8 +343,7 @@ detect_dmrs_stouffer_multi_seed <- function(win, p_seed, p_extend, max_gap_bp, m
       next
     }
 
-    z_scores_seed <- qnorm(1 - win$p[seed_idx])
-    stouffer_seed_p <- 2 * pnorm(-abs(sum(z_scores_seed) / sqrt(length(z_scores_seed))))
+    stouffer_seed_p <- p_stouffer(win$p[seed_idx])
     if (stouffer_seed_p > p_seed) {
       i <- max(seed_idx) + 1L
       next
@@ -363,8 +362,7 @@ detect_dmrs_stouffer_multi_seed <- function(win, p_seed, p_extend, max_gap_bp, m
       }
 
       test_idx <- c(run_idx, j)
-      z_scores <- qnorm(1 - win$p[test_idx])
-      stouffer_p <- 2 * pnorm(-abs(sum(z_scores) / sqrt(length(z_scores))))
+      stouffer_p <- p_stouffer(win$p[test_idx])
       if (stouffer_p <= p_extend && stouffer_p <= current_stouffer_p * max_p_degradation) {
         run_idx <- test_idx
         current_stouffer_p <- stouffer_p
@@ -384,8 +382,7 @@ detect_dmrs_stouffer_multi_seed <- function(win, p_seed, p_extend, max_gap_bp, m
       }
 
       test_idx <- c(k, run_idx)
-      z_scores <- qnorm(1 - win$p[test_idx])
-      stouffer_p <- 2 * pnorm(-abs(sum(z_scores) / sqrt(length(z_scores))))
+      stouffer_p <- p_stouffer(win$p[test_idx])
       if (stouffer_p <= p_extend && stouffer_p <= current_stouffer_p * max_p_degradation) {
         run_idx <- test_idx
         current_stouffer_p <- stouffer_p
@@ -395,8 +392,7 @@ detect_dmrs_stouffer_multi_seed <- function(win, p_seed, p_extend, max_gap_bp, m
       }
     }
 
-    z_scores_final <- qnorm(1 - win$p[run_idx])
-    final_stouffer_p <- 2 * pnorm(-abs(sum(z_scores_final) / sqrt(length(z_scores_final))))
+    final_stouffer_p <- p_stouffer(win$p[run_idx])
     strong_windows_frac <- sum(win$p[run_idx] <= p_seed) / length(run_idx)
 
     if (length(run_idx) >= min_windows &&
